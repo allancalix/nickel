@@ -7,7 +7,10 @@ use nickel_lang::repl::query_print;
 #[cfg(feature = "repl")]
 use nickel_lang::repl::rustyline_frontend;
 use nickel_lang::term::{RichTerm, Term};
-use nickel_lang::{serialize, serialize::ExportFormat};
+use nickel_lang::{
+    serialize,
+    serialize::{ExportFormat, RenameRule},
+};
 use std::path::{Path, PathBuf};
 use std::{
     fs::{self, File},
@@ -54,6 +57,10 @@ enum Command {
         /// Available formats: `raw, json, yaml, toml`. Default format: `json`.
         #[structopt(long)]
         format: Option<ExportFormat>,
+        // TODO(allancalix): Fill up the rest.
+        /// Available formats: `kebab-case, lowercase, uppercase`, . Default format: `None`.
+        #[structopt(long)]
+        field_case: Option<RenameRule>,
         /// Output file. Standard output by default
         #[structopt(short = "o", long)]
         #[structopt(parse(from_os_str))]
@@ -186,7 +193,11 @@ fn main() {
                 &mut std::io::BufWriter::new(Box::new(std::io::stdout())),
                 transform,
             ),
-            Some(Command::Export { format, output }) => export(&mut program, format, output),
+            Some(Command::Export {
+                format,
+                field_case,
+                output,
+            }) => export(&mut program, format, field_case, output),
             Some(Command::Query {
                 path,
                 doc,
@@ -235,10 +246,12 @@ fn main() {
 fn export(
     program: &mut Program<CacheImpl>,
     format: Option<ExportFormat>,
+    rename_fields: Option<RenameRule>,
     output: Option<PathBuf>,
 ) -> Result<(), Error> {
     let rt = program.eval_full_for_export().map(RichTerm::from)?;
     let format = format.unwrap_or_default();
+    let rename_fields = rename_fields.unwrap_or_default();
 
     // We only add a trailing newline for JSON exports. Both YAML and TOML
     // exporters already append a trailing newline by default.
@@ -248,13 +261,13 @@ fn export(
 
     if let Some(file) = output {
         let mut file = fs::File::create(file).map_err(IOError::from)?;
-        serialize::to_writer(&mut file, format, &rt)?;
+        serialize::to_writer(&mut file, format, rename_fields, &rt)?;
 
         if trailing_newline {
             writeln!(file).map_err(IOError::from)?;
         }
     } else {
-        serialize::to_writer(std::io::stdout(), format, &rt)?;
+        serialize::to_writer(std::io::stdout(), format, rename_fields, &rt)?;
 
         if trailing_newline {
             println!();

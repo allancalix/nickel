@@ -116,6 +116,87 @@ where
     t.serialize(serializer)
 }
 
+static RENAME_RULES: &[(&str, RenameRule)] = &[
+    ("lowercase", RenameRule::LowerCase),
+    ("UPPERCASE", RenameRule::UpperCase),
+    ("PascalCase", RenameRule::PascalCase),
+    ("camelCase", RenameRule::CamelCase),
+    ("snake_case", RenameRule::SnakeCase),
+    ("SCREAMING_SNAKE_CASE", RenameRule::ScreamingSnakeCase),
+    ("kebab-case", RenameRule::KebabCase),
+    ("SCREAMING-KEBAB-CASE", RenameRule::ScreamingKebabCase),
+];
+
+impl FromStr for RenameRule {
+    type Err = ParseFormatError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        for (name, rule) in RENAME_RULES {
+            if s == *name {
+                return Ok(*rule);
+            }
+        }
+
+        Err(ParseFormatError(s.into()))
+    }
+}
+
+/// The different possible ways to change case of fields in a struct, or variants in an enum.
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub enum RenameRule {
+    /// Don't apply a default rename rule.
+    #[default]
+    None,
+    /// Rename direct children to "lowercase" style.
+    LowerCase,
+    /// Rename direct children to "UPPERCASE" style.
+    UpperCase,
+    /// Rename direct children to "PascalCase" style, as typically used for
+    /// enum variants.
+    PascalCase,
+    /// Rename direct children to "camelCase" style.
+    CamelCase,
+    /// Rename direct children to "snake_case" style, as commonly used for
+    /// fields.
+    SnakeCase,
+    /// Rename direct children to "SCREAMING_SNAKE_CASE" style, as commonly
+    /// used for constants.
+    ScreamingSnakeCase,
+    /// Rename direct children to "kebab-case" style.
+    KebabCase,
+    /// Rename direct children to "SCREAMING-KEBAB-CASE" style.
+    ScreamingKebabCase,
+}
+
+impl RenameRule {
+    /// Apply a renaming rule to an enum variant, returning the version expected in the source.
+    pub fn apply_to_variant(&self, variant: &str) -> String {
+        use self::RenameRule::*;
+
+        match *self {
+            None | PascalCase => variant.to_owned(),
+            LowerCase => variant.to_ascii_lowercase(),
+            UpperCase => variant.to_ascii_uppercase(),
+            CamelCase => variant[..1].to_ascii_lowercase() + &variant[1..],
+            SnakeCase => {
+                let mut snake = String::new();
+                for (i, ch) in variant.char_indices() {
+                    if i > 0 && ch.is_uppercase() {
+                        snake.push('_');
+                    }
+                    snake.push(ch.to_ascii_lowercase());
+                }
+                snake
+            }
+            ScreamingSnakeCase => SnakeCase.apply_to_variant(variant).to_ascii_uppercase(),
+            KebabCase => SnakeCase.apply_to_variant(variant).replace('_', "-"),
+            ScreamingKebabCase => ScreamingSnakeCase
+                .apply_to_variant(variant)
+                .replace('_', "-"),
+        }
+    }
+}
+
 /// Serializer for a record. Serialize fields in alphabetical order to get a deterministic output
 pub fn serialize_record<S>(record: &RecordData, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -231,7 +312,334 @@ pub fn validate(format: ExportFormat, t: &RichTerm) -> Result<(), ExportError> {
     }
 }
 
-pub fn to_writer<W>(mut writer: W, format: ExportFormat, rt: &RichTerm) -> Result<(), ExportError>
+macro_rules! forward_ser {
+    ($fn:ident, $typ:ty) => {
+        fn $fn(self, v: $typ) -> Result<Self::Ok, Self::Error> {
+            self.0.$fn(v)
+        }
+    };
+}
+
+macro_rules! forward_ser_todo {
+    ($fn:ident, $typ:ty) => {
+        fn $fn(self, v: $typ) -> Result<Self::Ok, Self::Error> {
+            todo!()
+        }
+    };
+}
+
+struct RenamingMapSerializer<S>(S);
+impl<S: serde::ser::SerializeMap> serde::ser::SerializeMap for RenamingMapSerializer<S> {
+    type Ok = S::Ok;
+    type Error = S::Error;
+
+    fn serialize_entry<K: ?Sized, V: ?Sized>(
+            &mut self,
+            key: &K,
+            value: &V,
+        ) -> Result<(), Self::Error>
+        where
+            K: Serialize,
+            V: Serialize, {
+        self.0.serialize_entry(
+            &key.serialize(KeyRenamerSerializer).unwrap(),
+            value)
+    }
+
+    fn serialize_key<T: ?Sized>(&mut self, key: &T) -> Result<(), Self::Error>
+        where
+            T: Serialize {
+        self.0.serialize_key(&key.serialize(KeyRenamerSerializer).unwrap())
+    }
+
+    fn serialize_value<T: ?Sized>(&mut self, value: &T) -> Result<(), Self::Error>
+        where
+            T: Serialize {
+        self.0.serialize_value(value)
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        self.0.end()
+    }
+}
+
+struct KeyRenamerSerializer;
+
+impl Serializer for KeyRenamerSerializer {
+    type SerializeSeq = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+    type SerializeTuple = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+    type SerializeTupleStruct = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+    type SerializeTupleVariant = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+    type SerializeMap = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+    type SerializeStruct = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+    type SerializeStructVariant = serde::ser::Impossible<Self::Ok, toml::ser::Error>;
+
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        todo!()
+    }
+
+    // Now, if that one function above would be all the magic you need, it's be nice
+    // But it turns out there are a lot more places where you can change the case of the name
+    // Do you want to implement them all? I'll pass
+
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_newtype_struct<T: ?Sized>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize,
+    {
+        todo!()
+    }
+
+    fn serialize_newtype_variant<T: ?Sized>(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize,
+    {
+        todo!()
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_str(self, value: &str) -> Result<String, Self::Error> {
+        Ok(RenameRule::KebabCase.apply_to_variant(value))
+    }
+
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        todo!()
+    }
+
+    // Need a bunch of boilderplate, too.
+
+    type Ok = String;
+    type Error = toml::ser::Error;
+
+    forward_ser_todo! {serialize_bool, bool}
+    forward_ser_todo! {serialize_i8, i8}
+    forward_ser_todo! {serialize_i16, i16}
+    forward_ser_todo! {serialize_i32, i32}
+    forward_ser_todo! {serialize_i64, i64}
+    forward_ser_todo! {serialize_u8, u8}
+    forward_ser_todo! {serialize_u16, u16}
+    forward_ser_todo! {serialize_u32, u32}
+    forward_ser_todo! {serialize_u64, u64}
+    forward_ser_todo! {serialize_f32, f32}
+    forward_ser_todo! {serialize_f64, f64}
+    forward_ser_todo! {serialize_char, char}
+    forward_ser_todo! {serialize_bytes, &[u8]}
+    forward_ser_todo! {serialize_unit_struct, &'static str}
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_some<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize,
+    {
+        todo!()
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        todo!()
+    }
+}
+
+struct RenamingSerializer<S>(S);
+
+impl<S: Serializer> Serializer for RenamingSerializer<S> {
+    // The magic first: redirect the struct serializer to one that
+    type SerializeStruct = S::SerializeStruct;
+
+    fn serialize_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStruct, Self::Error> {
+        self.0.serialize_struct(name, len)
+    }
+
+    // Now, if that one function above would be all the magic you need, it's be nice
+    // But it turns out there are a lot more places where you can change the case of the name
+    // Do you want to implement them all? I'll pass
+
+    fn serialize_unit_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_unit_variant(name, variant_index, variant)
+    }
+
+    fn serialize_newtype_struct<T: ?Sized>(
+        self,
+        name: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize,
+    {
+        self.0.serialize_newtype_struct(name, value)
+    }
+
+    fn serialize_newtype_variant<T: ?Sized>(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize,
+    {
+        self.0.serialize_newtype_variant(name, variant_index, variant, value)
+    }
+
+    fn serialize_tuple_struct(
+        self,
+        name: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
+        self.0.serialize_tuple_struct(name, len)
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        self.0.serialize_tuple_variant(name, variant_index, variant, len)
+    }
+
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
+        self.0.serialize_map(len).map(|s| RenamingMapSerializer(s))
+    }
+
+    fn serialize_struct_variant(
+        self,
+        name: &'static str,
+        variant_index: u32,
+        variant: &'static str,
+        len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        self.0.serialize_struct_variant(name, variant_index, variant, len)
+    }
+
+    type SerializeSeq = S::SerializeSeq;
+    type SerializeTuple = S::SerializeTuple;
+    type SerializeTupleStruct = S::SerializeTupleStruct;
+    type SerializeTupleVariant = S::SerializeTupleVariant;
+    type SerializeMap = RenamingMapSerializer<S::SerializeMap>;
+    type SerializeStructVariant = S::SerializeStructVariant;
+
+    // Need a bunch of boilderplate, too.
+
+    type Ok = S::Ok;
+    type Error = S::Error;
+
+    forward_ser! {serialize_bool, bool}
+    forward_ser! {serialize_i8, i8}
+    forward_ser! {serialize_i16, i16}
+    forward_ser! {serialize_i32, i32}
+    forward_ser! {serialize_i64, i64}
+    forward_ser! {serialize_u8, u8}
+    forward_ser! {serialize_u16, u16}
+    forward_ser! {serialize_u32, u32}
+    forward_ser! {serialize_u64, u64}
+    forward_ser! {serialize_f32, f32}
+    forward_ser! {serialize_f64, f64}
+    forward_ser! {serialize_char, char}
+    forward_ser! {serialize_str, &str}
+    forward_ser! {serialize_bytes, &[u8]}
+    forward_ser! {serialize_unit_struct, &'static str}
+
+    fn serialize_none(self) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_none()
+    }
+
+    fn serialize_some<T: ?Sized>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: Serialize,
+    {
+        self.0.serialize_some(value)
+    }
+
+    fn serialize_unit(self) -> Result<Self::Ok, Self::Error> {
+        self.0.serialize_unit()
+    }
+
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
+        self.0.serialize_seq(len)
+    }
+
+    fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
+        self.0.serialize_tuple(len)
+    }
+}
+
+pub fn to_writer<W>(
+    mut writer: W,
+    format: ExportFormat,
+    rename_rule: RenameRule,
+    rt: &RichTerm,
+) -> Result<(), ExportError>
 where
     W: io::Write,
 {
@@ -241,13 +649,18 @@ where
         ExportFormat::Yaml => {
             serde_yaml::to_writer(writer, &rt).map_err(|err| ExportError::Other(err.to_string()))
         }
-        ExportFormat::Toml => toml::to_string_pretty(rt)
+        ExportFormat::Toml => {
+            let mut value = String::new();
+            let s = RenamingSerializer(toml::Serializer::pretty(&mut value));
+
+            serde::Serialize::serialize(&rt, s)
             .map_err(|err| ExportError::Other(err.to_string()))
-            .and_then(|s| {
+            .and_then(|_s| {
                 writer
-                    .write_all(s.as_bytes())
+                    .write_all(value.as_bytes())
                     .map_err(|err| ExportError::Other(err.to_string()))
-            }),
+            })
+        }
         ExportFormat::Raw => match rt.as_ref() {
             Term::Str(s) => writer
                 .write_all(s.as_bytes())
@@ -264,7 +677,7 @@ where
 
 pub fn to_string(format: ExportFormat, rt: &RichTerm) -> Result<String, ExportError> {
     let mut buffer: Vec<u8> = Vec::new();
-    to_writer(&mut buffer, format, rt)?;
+    to_writer(&mut buffer, format, RenameRule::default(), rt)?;
 
     Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
